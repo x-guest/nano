@@ -1366,17 +1366,24 @@ void updateDisplay() {
 
   if (state == MAIN_SCREEN || state == FAST_DOSING) {
     if (state == FAST_DOSING) {
-      printStr(F("ЕДИТ ПОРЦИЙ"), 0, 1, false);
+      printStr(F("ОБЪЕМ"), 0, 1, false);
     } else {
       if (workMode == MODE_MANUAL) printStr(T_MANUAL, 0, 1, true);
       else if (workMode == MODE_AUTOMATIC) printStr(T_AUTO, 0, 1, true);
       else printStr(T_ROULETTE, 0, 1, true);
     }
 
-    if (set.mp3Volume == 0) {
-      oled.setCursor(115, 0);
-      oled.print('M');
-    }
+    //if (set.mp3Volume == 0) {
+      //oled.setCursor(115, 0);
+      //oled.print('M');
+    //}
+
+if (set.mp3Volume == 0) {
+    oled.invertText(true);
+    oled.setCursor(110, 0);
+    oled.print(F(" M "));
+    oled.invertText(false);
+}
 
     oled.setScale(1);
 
@@ -1384,7 +1391,7 @@ void updateDisplay() {
     printGlassesRow(3, 4, (state == FAST_DOSING), dosingGlassSelector);
 
     if (state == FAST_DOSING) {
-      printStr(F("Круть - мл Клик - След"), 7, 1, false);
+      printStr(F("Круть/Клик"), 7, 1, false);
     } else {
       if (workMode == MODE_MANUAL || workMode == MODE_ROULETTE) {
         printStr(M_CLICK_POUR, 7, 1, true);

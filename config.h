@@ -4,114 +4,147 @@
 // ============================================================================
 // ⚙️ ЖЕСТКАЯ КАРТА РАСКЛЮЧЕНИЯ ПИНОВ ПЕРИФЕРИИ НА ПЛАТЕ ARDUINO NANO
 // ============================================================================
-#define NUM_GLASSES 6           // Количество рюмок в системе (строго от 1 до 6)
-#define LED_PIN 13              // Выход управления адресной LED-лентой WS2812B (D13)
 
-// Пины органов управления (Энкодер KY-040)
-#define ENCODER_CLK 2           // Шаг вращения А (Аппаратное прерывание D2)
-#define ENCODER_DT 3            // Шаг вращения В (Аппаратное прерывание D3)
-#define ENCODER_SW 17           // Кнопка клика переехала на аналоговую ногу А3 (цифровой D17)
+// === ОСНОВНЫЕ НАСТРОЙКИ ===
+#define NUM_GLASSES 6           // Количество рюмок в системе (от 1 до 6)
+#define LED_PIN 13              // Пин управления LED-лентой WS2812B (D13)
 
-// Пины исполнительных устройств и концевиков механики
-#define PUMP_PIN 4              // Выход управления голым транзистором IRF520N помпы (D4)
-#define HOME_SW_PIN 12          // Вход микроконцевика KW10 нулевой точки башни "ДОМ" (D12)
+// === ЭНКОДЕР KY-040 (крутилка с кнопкой) ===
+#define ENCODER_CLK 2           // Пин CLK (шаг A) — аппаратное прерывание
+#define ENCODER_DT 3            // Пин DT (шаг B) — аппаратное прерывание
+#define ENCODER_SW 17           // Пин кнопки энкодера (A3, цифровой 17)
 
-// Пины аппаратного подключения MP3-плеера DFPlayer Mini (UART на пинах D0 и D1)
-#define MP3_TX_PIN 0            
-#define MP3_RX_PIN 1            
-#define MP3_BUSY_PIN 11         
+// === ИСПОЛНИТЕЛЬНЫЕ УСТРОЙСТВА ===
+#define PUMP_PIN 4              // Пин управления помпой (транзистор IRF520N)
+#define HOME_SW_PIN 12          // Пин концевика "ДОМ" (нулевая позиция башни)
 
-// Пины силового драйвера шагового мотора ULN2003
-#define STEPPER_IN1 7           
-#define STEPPER_IN2 8           
-#define STEPPER_IN3 9           
-#define STEPPER_IN4 10          
+// === MP3 ПЛЕЕР DFPLAYER MINI (аппаратный UART) ===
+#define MP3_TX_PIN 0            // TX пин (подключается к RX плеера)
+#define MP3_RX_PIN 1            // RX пин (подключается к TX плеера)
+#define MP3_BUSY_PIN 11         // Пин BUSY — сигнал "плеер играет"
 
+// === ШАГОВЫЙ ДВИГАТЕЛЬ ULN2003 (28BYJ-48) ===
+#define STEPPER_IN1 7           // Катушка A (синяя или розовая)
+#define STEPPER_IN2 8           // Катушка A- (жёлтая или оранжевая)
+#define STEPPER_IN3 9           // Катушка B (розовая или синяя)
+#define STEPPER_IN4 10          // Катушка B- (оранжевая или жёлтая)
+
+// === ДАТЧИКИ НАЛИЧИЯ РЮМОК (концевики или герконы) ===
+// Пины подключения датчиков: первые 3 на цифровых пинах 14,15,16 (A0,A1,A2),
+// четвёртый на D5, пятый и шестой на аналоговых A6, A7
 const int pinSensors[NUM_GLASSES] = { 14, 15, 16, 5, A6, A7 };
 
 // ============================================================================
 // 🎯 ЗАВОДСКИЕ ПАРАМЕТРЫ СИСТЕМЫ ПО УМОЛЧАНИЮ
 // ============================================================================
-const int VOLUME_STEP_ML = 5;             // Шаг изменения объема налива (мл)
-const int DEFAULT_SHOT_VOLUME = 30;       // Базовая порция налива (мл)
-const int DEFAULT_ML_TIME_MS  = 2500;     // Время работы насоса на 50 мл (мс) - КАЛИБРУЕТСЯ
+
+// === НАСТРОЙКИ НАЛИВА ===
+const int VOLUME_STEP_ML = 5;             // Шаг изменения объёма при вращении энкодера (мл)
+const int DEFAULT_SHOT_VOLUME = 30;       // Базовая порция налива по умолчанию (мл)
+const int DEFAULT_ML_TIME_MS  = 2500;     // Время работы помпы на 50 мл (калибруется пользователем!)
 const int DEFAULT_SAVED_MODE  = 0;        // Стартовый режим: 0-Ручной, 1-Авто, 2-Рулетка
-const int DEFAULT_TOAST_DELAY = 15;       
-const int DEFAULT_TOAST_PAUSE = 1;        
-const int DEFAULT_VOLUME = 20;            
 
-const int DEFAULT_LED_BRIGHTNESS = 100;   // Общая максимальная яркость системы (10-255)
-const int DEFAULT_ROULETTE_SPEED = 5;     
-const int DEFAULT_SENSOR_DELAY_MS = 800;  
+// === НАСТРОЙКИ ТОСТОВ (Тамада) ===
+const int DEFAULT_TOAST_DELAY = 15;       // Задержка перед воспроизведением тоста (сек)
+const int DEFAULT_TOAST_PAUSE = 1;        // Пауза между тостами (сек)
 
-const int MIN_POUR_VOLUME = 0;            // Нижний порог 0 = рюмка ВЫКЛЮЧЕНА
-const int MAX_POUR_VOLUME = 150;          
-const int SLEEP_TIMEOUT_MINUTES = 5;      
+// === НАСТРОЙКИ ЗВУКА ===
+const int DEFAULT_VOLUME = 20;            // Громкость MP3 по умолчанию (0-30)
 
-// 🎯 Параметры функции "Пинатель" (Напоминание о полном стакане)
-const int DEFAULT_STALE_TIME_S = 30;      // Заводское время простоя рюмки до напоминания (сек)
-const int STALE_TIME_STEP_S = 5;          // Шаг изменения времени простоя в меню (сек)
-const int MAX_STALE_TIME_S = 180;         // Максимальное настраиваемое время простоя (сек)
-const int STALE_SOUND_TRACK_ID = 3;       // Номер трека напоминания ("003.mp3" в системной папке "00")
+// === НАСТРОЙКИ ПОДСВЕТКИ ===
+const int DEFAULT_LED_BRIGHTNESS = 60;    // Яркость LED-ленты (10-255)
 
-// Настройки длительности самого оповещения
-const int DEFAULT_STALE_ALERT_S = 5;      // Заводская длительность пинка (сек)
-const int STALE_ALERT_STEP_S = 1;         // Шаг изменения длительности пинка в меню (сек)
-const int MAX_STALE_ALERT_S = 30;         // Максимальная длительность пинка в меню (сек)
+// === НАСТРОЙКИ РУЛЕТКИ ===
+const int DEFAULT_ROULETTE_SPEED = 5;     // Скорость "бегущего огонька" (1-10)
+const int DEFAULT_SENSOR_DELAY_MS = 400;  // Задержка после установки рюмки перед наливом (мс)
 
-// 🎨 КАСТОМИЗАЦИЯ ПОДСВЕТКИ И ЯРКОСТИ РЮМОК
-#define COLOR_STANDBY   CRGB(200, 200, 200) // Цвет дежурного режима (Рюмок нет)
-#define COLOR_ACTIVE    CRGB(255, 255, 255) // Цвет активной рюмки на столе (>0 мл)
-#define COLOR_DISABLED  CRGB(255, 0, 0)     // Цвет выключенной рюмки на столе (0 мл)
-#define COLOR_POURED    CRGB(0, 255, 0)     // Цвет наполненной рюмки (Зеленый)
+// === ОГРАНИЧЕНИЯ ===
+const int MIN_POUR_VOLUME = 0;            // Минимальный объём (0 = рюмка отключена)
+const int MAX_POUR_VOLUME = 150;          // Максимальный объём (мл)
+const int SLEEP_TIMEOUT_MINUTES = 5;      // Таймаут до сна (минут)
 
-const int BRIGHT_STANDBY  = 15;   // Яркость дежурного режима (тусклый белый)
-const int BRIGHT_ACTIVE   = 180;  // Яркость активной рюмки (яркий белый)
-const int BRIGHT_DISABLED = 25;   // Яркость отключенной рюмки (тусклый красный)
-const int BRIGHT_POURED   = 150;  // Яркость налитой рюмки (зеленый)
+// === ФУНКЦИЯ "ПИНАТЕЛЬ" (напоминание о полном стакане) ===
+const int DEFAULT_STALE_TIME_S = 300;     // Время простоя до напоминания (сек)
+const int STALE_TIME_STEP_S = 10;         // Шаг изменения времени простоя в меню (сек)
+const int MAX_STALE_TIME_S = 600;         // Максимальное время простоя (сек)
+const int STALE_SOUND_TRACK_ID = 3;       // Номер MP3-трека для напоминания
 
-// Параметры скорости шагового двигателя
-const int MOTOR_MAX_SPEED_POUR = 800;     
-const int MOTOR_MAX_SPEED_CALIB = 400;    
-const int MOTOR_ACCELERATION_RATE = 1200; 
-const int CALIBRATION_STEP_STEPS = 100;         
+// Длительность самого "пинка" (мигания и звука)
+const int DEFAULT_STALE_ALERT_S = 10;     // Длительность оповещения (сек)
+const int STALE_ALERT_STEP_S = 1;         // Шаг изменения (сек)
+const int MAX_STALE_ALERT_S = 300;        // Максимальная длительность (сек)
 
-// Настройка папок на MicroSD-карте
-const int SYSTEM_SOUND_FOLDER = 0;        
-const int ROULETTE_TRACK_ID = 1;          
-const int TOAST_SOUND_FOLDER = 1;         
-const int TOTAL_TOAST_TRACKS = 100;       
+// ============================================================================
+// 🎨 КАСТОМИЗАЦИЯ ПОДСВЕТКИ РЮМОК
+// ============================================================================
 
-const int DEFAULT_ROULETTE_SPIN_S = 4;    
-const int MIN_ROULETTE_SPIN_S = 4;        
-const int MAX_ROULETTE_SPIN_S = 15;       
+// Цвета (CRGB из библиотеки FastLED)
+#define COLOR_STANDBY   CRGB(200, 200, 200) // Цвет — нет рюмок (белый)
+#define COLOR_ACTIVE    CRGB(255, 255, 255) // Цвет активной рюмки (ярко-белый)
+#define COLOR_DISABLED  CRGB(255, 0, 0)     // Цвет отключённой рюмки (красный)
+#define COLOR_POURED    CRGB(0, 255, 0)     // Цвет налитой рюмки (зелёный)
 
-const int DOUBLE_CLICK_TIMEOUT_MS = 350;  
-const int DEFAULT_SHOT_POS[NUM_GLASSES] = { 250, 590, 930, 1270, 1610, 1950 };
-const int DEFAULT_HOME_OFFSET = 0;        
-const int stepsPerRevolution = 4096;      
+// Яркость для каждого состояния (0-255)
+const int BRIGHT_STANDBY  = 25;   // Дежурный режим (тусклый)
+const int BRIGHT_ACTIVE   = 180;  // Активная рюмка (яркий)
+const int BRIGHT_DISABLED = 25;   // Отключённая рюмка (тусклый)
+const int BRIGHT_POURED   = 180;  // Налитая рюмка (зелёный)
 
-const int TOTAL_MENU_ITEMS = 11;          // [ИСПРАВЛЕНО]: В корне меню снова строго 11 физических пунктов, пустых мест нет
-#define HISTORY_SIZE 8                    
+// ============================================================================
+// ⚙️ НАСТРОЙКИ ШАГОВОГО ДВИГАТЕЛЯ
+// ============================================================================
+const int MOTOR_MAX_SPEED_POUR = 800;      // Скорость при наливе (шагов/сек)
+const int MOTOR_MAX_SPEED_CALIB = 400;     // Скорость при калибровке
+const int MOTOR_ACCELERATION_RATE = 1200;  // Ускорение (шагов/сек²)
+const int CALIBRATION_STEP_STEPS = 100;    // Шаг изменения позиции при калибровке
 
+// ============================================================================
+// 🎵 НАСТРОЙКИ MP3 ПЛЕЕРА (папки на SD-карте)
+// ============================================================================
+const int SYSTEM_SOUND_FOLDER = 0;         // Системная папка (00) — звуки событий
+const int ROULETTE_TRACK_ID = 1;           // Номер трека "Рулетка" в папке 00
+const int TOAST_SOUND_FOLDER = 1;          // Папка с тостами (01)
+const int TOTAL_TOAST_TRACKS = 100;        // Количество треков в папке тостов
+
+// ============================================================================
+// 🎲 НАСТРОЙКИ РУЛЕТКИ
+// ============================================================================
+const int DEFAULT_ROULETTE_SPIN_S = 4;     // Длительность вращения рулетки (сек)
+const int MIN_ROULETTE_SPIN_S = 4;         // Минимальное время
+const int MAX_ROULETTE_SPIN_S = 15;        // Максимальное время
+
+// ============================================================================
+// 🕹️ ОБЩИЕ НАСТРОЙКИ
+// ============================================================================
+const int DOUBLE_CLICK_TIMEOUT_MS = 350;   // Время ожидания двойного клика (мс)
+const int DEFAULT_SHOT_POS[NUM_GLASSES] = { 250, 590, 930, 1270, 1610, 1950 };  // Позиции рюмок в шагах
+const int DEFAULT_HOME_OFFSET = 0;         // Смещение нулевой позиции (шагов)
+const int stepsPerRevolution = 4096;       // Шагов на полный оборот двигателя
+
+const int TOTAL_MENU_ITEMS = 11;           // Количество пунктов в главном меню
+#define HISTORY_SIZE 8                     // Глубина истории (для будущего использования)
+
+// ============================================================================
+// 📦 СТРУКТУРА ДЛЯ ХРАНЕНИЯ НАСТРОЕК В EEPROM
+// ============================================================================
 struct Settings {
-  int shotVolume;                         
-  int mlTimeMs;                           
-  int shotPos[NUM_GLASSES];               
-  int homePos;                            
-  int savedMode;                          
-  int toastDelayS;                        
-  int toastPauseS;                        
-  int shotVolumeIndividual[NUM_GLASSES];  
-  bool shotVolumeCustomized[NUM_GLASSES]; 
-  int mp3Volume;                          
-  int ledBrightness;                      
-  int rouletteSpeed;                      
-  int sensorDelayMs;                      
-  int rouletteSpinS;                      
-  int startDelayS;                        
-  int staleTimeS;                         
-  int staleAlertS;                        
+  int shotVolume;                         // Объём по умолчанию (мл)
+  int mlTimeMs;                           // Время налива 50 мл (калибровка)
+  int shotPos[NUM_GLASSES];               // Позиции рюмок (шаги)
+  int homePos;                            // Позиция "ДОМ" (шаги)
+  int savedMode;                          // Сохранённый режим (0-ручной,1-авто,2-рулетка)
+  int toastDelayS;                        // Задержка тоста (сек)
+  int toastPauseS;                        // Пауза между тостами (сек)
+  int shotVolumeIndividual[NUM_GLASSES];  // Индивидуальный объём для каждой рюмки
+  bool shotVolumeCustomized[NUM_GLASSES]; // Флаг — объём изменён вручную
+  int mp3Volume;                          // Громкость MP3 (0-30)
+  int ledBrightness;                      // Яркость LED-ленты
+  int rouletteSpeed;                      // Скорость рулетки
+  int sensorDelayMs;                      // Задержка датчиков (мс)
+  int rouletteSpinS;                      // Время вращения рулетки (сек)
+  int startDelayS;                        // Задержка перед стартовым приветствием (сек)
+  int staleTimeS;                         // Время до "пинка" (сек)
+  int staleAlertS;                        // Длительность "пинка" (сек)
 };
 
 #endif
