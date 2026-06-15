@@ -1,247 +1,270 @@
-//--------------------------------------------------------------------------------------------------------- 1-я часть. НАЧАЛО -------------------------------------------------------------------------------------------------
-#include <Wire.h>
+#include <Arduino.h>
 #include <FastLED.h>
-#include <SoftwareSerial.h>
-#include <EEPROM.h>
 #include <GyverOLED.h>
-#include "config.h" 
+#include <EEPROM.h>
+#include "config.h"
 
-const unsigned long SLEEP_TIMEOUT_MS = SLEEP_TIMEOUT_MINUTES * 60000UL;
-
-enum MenuState {
-MAIN_SCREEN, ROOT_MENU, SUB_MENU_EDIT, SET_MODE,
-SET_BASE_VOLUME,
-SET_ROULETTE_MENU, SET_TOAST_TIME,
-CAL_PUMP, POURING, TOAST_SCREEN, PUMP_FLUSH, RESET_PAGE, SLEEP_MODE,
-SET_STALE_MENU,
-SET_STALE_TIME,
-FAST_DOSING
-};
-MenuState state = MAIN_SCREEN;
-
-enum WorkMode { MODE_MANUAL, MODE_AUTOMATIC, MODE_ROULETTE };
-WorkMode workMode = MODE_MANUAL;
-
-// Прозрачная архитектура состояний для каждого посадочного места
-enum GlassStatus { EMPTY_SPACE, EMPTY_GLASS, POURING_GLASS, FILLED_GLASS, DISABLED_SPACE };
-GlassStatus glassState[NUM_GLASSES];
+// ============================================================================
+// 📦 ОБЪЕКТЫ И ПЕРЕМЕННЫЕ
+// ============================================================================
+GyverOLED<SSD1306_128x64, OLED_NO_BUFFER> oled;
 
 Settings set;
-GyverOLED<SSD1306_128x64, OLED_NO_BUFFER> oled;
 CRGB leds[NUM_GLASSES];
-SoftwareSerial mp3Serial(MP3_TX_PIN, MP3_RX_PIN);
 
-const int stepperPins[] = { STEPPER_IN1, STEPPER_IN2, STEPPER_IN3, STEPPER_IN4 };
-int _stepIdx = 0; long currentStepperPos = 0;
-int currentGlass = 0;
+enum MenuState {
+  MAIN_SCREEN,
+  FAST_DOSING,
+  ROOT_MENU,
+  SET_MODE,
+  SUB_MENU_EDIT,
+  SET_BASE_VOLUME,
+  SET_INVITE_MENU,      // Настройки Зазывалы вместо рулетки
+  SET_TOAST_TIME,
+  SET_STALE_MENU,
+  SET_STALE_TIME,
+  CAL_PUMP,
+  PUMP_FLUSH,
+  RESET_PAGE,
+  POURING,
+  TOAST_SCREEN,
+  SLEEP_MODE
+};
 
-// Массивы для отслеживания очереди в режиме Казино (Рулетка)
-bool rouletteActiveGlasses[NUM_GLASSES] = {false, false, false, false, false, false};
-bool roulettePouredFlags[NUM_GLASSES] = {false, false, false, false, false, false};
+enum WorkMode {
+  MODE_MANUAL,
+  MODE_AUTOMATIC
+};
 
-int lastClk = HIGH; unsigned long pressTime = 0;
-bool isPress = false, longPressTriggered = false;
-int menuSelector = 0, dosingGlassSelector = 0, toastSubItem = 0, activeToastID = 0;
-unsigned long glassPlacementTime[NUM_GLASSES] = {0};
-bool glassTimerArmed[NUM_GLASSES] = {false};
+enum GlassStatus {
+  EMPTY_SPACE,
+  EMPTY_GLASS,
+  POURING_GLASS,
+  FILLED_GLASS,
+  DISABLED_SPACE
+};
+
+MenuState state = MAIN_SCREEN;
+WorkMode workMode = MODE_MANUAL;
+GlassStatus glassState[NUM_GLASSES];
+
+// Неблокирующие таймеры и переменные управления
 unsigned long lastActivityTime = 0;
-
-// Массивы автоматов контроля времени функции "Пинатель"
-unsigned long glassStaleTimer[NUM_GLASSES] = {0, 0, 0, 0, 0, 0};
-unsigned long alertStopTimer[NUM_GLASSES] = {0, 0, 0, 0, 0, 0};
-bool isAlerting[NUM_GLASSES] = {false, false, false, false, false, false};
-bool staleTimerArmed[NUM_GLASSES] = {false, false, false, false, false, false};
-
-// Таймеры защиты от лавины повторных тостов и фантомных кликов энкодера
-unsigned long lastToastTime = 0;
 unsigned long lastEncoderMoveTime = 0;
-
-// ========== ПЕРЕМЕННЫЕ ДЛЯ АНТИДРЕБЕЗГА КНОПКИ ==========
 unsigned long lastButtonDebounceTime = 0;
-const unsigned long BUTTON_DEBOUNCE_MS = 50;
-bool lastButtonState = HIGH;
-bool buttonPressProcessed = false;
-// ==========================================================
-
-// Автомат распознавания двойного клика кнопки энкодера
+unsigned long pressTime = 0;
 unsigned long lastReleaseTime = 0;
-bool waitSecondClick = false;
-
-// Глобальные флаги и таймеры контроля состояний Тамады
-bool toastPending = false;
-bool toastAudioPending = false;
+unsigned long lastToastTime = 0;
 unsigned long toastScreenTimer = 0;
 unsigned long toastAudioTimer = 0;
+unsigned long glassPlacementTime[NUM_GLASSES] = {0};
+unsigned long glassStaleTimer[NUM_GLASSES] = {0};
+unsigned long alertStopTimer[NUM_GLASSES] = {0};
+unsigned long lastInviteTime = 0; // Наш фоновый таймер отсчета тишины Зазывалы
 
-// === ОПТИМИЗИРОВАННЫЙ PROGMEM (объединение похожих строк) ===
+int menuSelector = 0;
+int dosingGlassSelector = 0;
+int currentGlass = 0;
+int activeToastID = 1;
+int currentStepperPos = 0;
+int lastClk = HIGH;
+
+bool lastButtonState = HIGH;
+bool buttonPressProcessed = false;
+bool isPress = false;
+bool longPressTriggered = false;
+bool waitSecondClick = false;
+bool toastAudioPending = false;
+bool isAlerting[NUM_GLASSES] = {false};
+bool staleTimerArmed[NUM_GLASSES] = {false};
+bool glassTimerArmed[NUM_GLASSES] = {false};
+uint8_t toastSubItem = 0;
+
+// ============================================================================
+// 📑 БАЗОВЫЕ СТРОКОВЫЕ КОНСТАНТЫ В ПАМЯТИ PROGMEM
+// ============================================================================
 const char T_MANUAL[] PROGMEM = "РУЧНОЙ";
 const char T_AUTO[] PROGMEM = "АВТОМАТ";
-const char T_ROULETTE[] PROGMEM = "РУЛЕТКА";
+const char T_MENU[] PROGMEM = "МЕНЮ";
+const char T_HOME_BASE[] PROGMEM = "ДОМ.ТОЧКА";
 const char T_BACK[] PROGMEM = "НАЗАД";
+const char T_OK[] PROGMEM = "ОК";
+const char T_DONE[] PROGMEM = "ГОТОВО";
+const char T_FLUSH[] PROGMEM = "ПРОМЫВКА";
+const char T_RESET[] PROGMEM = "СБРОС";
 const char T_ON[] PROGMEM = "ВКЛ";
 const char T_OFF[] PROGMEM = "ВЫКЛ";
-const char T_MENU[] PROGMEM = "МЕНЮ";
-const char T_HOME_BASE[] PROGMEM = "ДОМ";
 
-// Универсальные короткие строки
-const char T_RESET[] PROGMEM = "СБРОС";
-const char T_FLUSH[] PROGMEM = "ПРОЛИВ...";
-const char T_OK[] PROGMEM = "ОК";
-const char T_DONE[] PROGMEM = "ВЫПОЛНЕНО!";
-
-// Подсказки
-const char T_ROT_HINT[] PROGMEM = "Круть Клик";
+const char M_CLICK_POUR[] PROGMEM = "Клик для налива";
 const char M_WAIT_GLASS[] PROGMEM = "Жду рюмку...";
-const char M_CLICK_POUR[] PROGMEM = "Клик";
+const char M_NO_GLASS[] PROGMEM = "Нет рюмок!";
+const char M_NO_NEW[] PROGMEM = "Нет новых рюмок";
+const char M_PLACE_GLASS[] PROGMEM = "Поставьте рюмку";
+const char M_REMOVED[] PROGMEM = "Рюмка убрана!";
+const char M_ABORT[] PROGMEM = "Налив прерван";
+const char M_CALIB_TITLE[] PROGMEM = "КАЛИБРОВКА";
+const char M_INVITE_CALL[] PROGMEM = "Пора накатить!.."; 
+const char M_RESET_CONF[] PROGMEM = "Сбросить память?";
+const char M_FLUSH_CONF[] PROGMEM = "Включить промывку?";
+const char T_ROT_HINT[] PROGMEM = "Поворот - Выбор";
 
-// Сообщения (короткие и информативные)
-const char M_NO_GLASS[] PROGMEM = "НЕТ РЮМОК!";
-const char M_PLACE_GLASS[] PROGMEM = "УСТАНОВИТЕ РЮМКУ!";
-const char M_REMOVED[] PROGMEM = "РЮМКА СНЯТА!";
-const char M_ABORT[] PROGMEM = "НАЛИВ ПРЕРВАН";
-const char M_NO_NEW[] PROGMEM = "НЕТ НОВЫХ РЮМОК!";
-const char M_ROULETTE_SPIN[] PROGMEM = "РУЛЕТКА...";
-const char M_RESET_CONF[] PROGMEM = "СБРОС НАСТРОЕК";
-const char M_FLUSH_CONF[] PROGMEM = "ПРОМЫВКА СИСТЕМЫ";
-const char M_CALIB_TITLE[] PROGMEM = "ВРЕМЯ НАЛИВА 50МЛ";
+// Названия пунктов главного меню
+const char M0[] PROGMEM = "РЕЖИМ";
+const char M1[] PROGMEM = "УГЛЫ";
+const char M2[] PROGMEM = "ОБЪЕМ";
+const char M3[] PROGMEM = "ЗАЗЫВАЛА"; // Пункт меню вместо Рулетки
+const char M4[] PROGMEM = "ТАМАДА";
+const char M5[] PROGMEM = "ПИНАТЕЛЬ";
+const char M6[] PROGMEM = "ПОМПА";
+const char M7[] PROGMEM = "СВЕТ";
+const char M8[] PROGMEM = "ЗАДЕРЖКА";
+const char M9[] PROGMEM = "ПРОЛИВ";
+const char M10[] PROGMEM = "СБРОС";
+const char* const MENU[] PROGMEM = {M0, M1, M2, M3, M4, M5, M6, M7, M8, M9, M10};
 
-// Универсальная функция печати строк
-void printStr(const char* str, uint8_t y, uint8_t scale, bool isProgmem = true);
-void printStr(const __FlashStringHelper* str, uint8_t y, uint8_t scale, bool isProgmem = true);
+const char S_EDIT[] PROGMEM = " ЕДИТ ПОРЦИЙ ";
+const char S_MAN[] PROGMEM = " РУЧНОЙ РЕЖИМ ";
+const char S_AUTO[] PROGMEM = " АВТО РЕЖИМ ";
+const char S_ROUL[] PROGMEM = " ЗАЗЫВАЛА ";
+const char S_HINT1[] PROGMEM = "Крути-мл|Клик-След";
+const char S_STEP[] PROGMEM = "ШАГИ:";
+const char S_MS[] PROGMEM = " мс";
+const char S_SEC[] PROGMEM = " сек";
+const char S_ML[] PROGMEM = " мл";
+const char S_VOL[] PROGMEM = "ОБЪЕМ (ОБЩИЙ)";
+const char S_T_OUT[] PROGMEM = "ТАЙМАУТ";
+const char S_SND[] PROGMEM = "ЗВУК";
+const char S_PNK[] PROGMEM = "ПИНОК";
+const char S_BRG[] PROGMEM = "ЯРКОСТЬ";
+const char S_MIN[] PROGMEM = " мин"; 
+const char S_VOL_M[] PROGMEM = "ГРОМКОСТЬ";
+const char S_PAUSE[] PROGMEM = "ПАУЗА";
+const char S_DELAY[] PROGMEM = "ОТСРОЧКА";
+const char S_STRT[] PROGMEM = " СТАРТ ";
+const char S_TEST[] PROGMEM = "Зажмите для теста";
+const char S_SHG[] PROGMEM = " шг";
+const char S_KD[] PROGMEM = " кд";
 
-// Быстрый опрос датчиков
-bool readGlassSensor(uint8_t glassIdx) {
-int pin = pinSensors[glassIdx];
-if (pin == A6 || pin == A7) return (analogRead(pin) < 400) ? LOW : HIGH;
-pinMode(pin, INPUT_PULLUP);
-return digitalRead(pin);
-}
-
-void sendMP3Raw(byte cmd, byte d1, byte d2) {
-byte buf[] = {0x7E, 0xFF, 0x06, cmd, 0x00, d1, d2, 0xEF};
-for (byte i = 0; i < 8; i++) mp3Serial.write(buf[i]);
-}
-//--------------------------------------------------------------------------------------------------------- 1-я часть. КОНЕЦ -------------------------------------------------------------------------------------------------
-
-//--------------------------------------------------------------------------------------------------------- 2-я часть. НАЧАЛО -------------------------------------------------------------------------------------------------
-void setDefaultSettings() {
-set.shotVolume = DEFAULT_SHOT_VOLUME;
-set.mlTimeMs = DEFAULT_ML_TIME_MS;
-set.savedMode = DEFAULT_SAVED_MODE;
-set.toastDelayS = DEFAULT_TOAST_DELAY;
-set.toastPauseS = DEFAULT_TOAST_PAUSE;
-set.homePos = DEFAULT_HOME_OFFSET;
-set.mp3Volume = DEFAULT_VOLUME;
-set.ledBrightness = DEFAULT_LED_BRIGHTNESS;
-set.rouletteSpeed = DEFAULT_ROULETTE_SPEED;
-set.sensorDelayMs = DEFAULT_SENSOR_DELAY_MS;
-set.rouletteSpinS = DEFAULT_ROULETTE_SPIN_S;
-set.startDelayS = 3;
-set.staleTimeS = DEFAULT_STALE_TIME_S;
-set.staleAlertS = DEFAULT_STALE_ALERT_S;
-for (int i = 0; i < NUM_GLASSES; i++) {
-set.shotPos[i] = DEFAULT_SHOT_POS[i];
-set.shotVolumeIndividual[i] = DEFAULT_SHOT_VOLUME;
-set.shotVolumeCustomized[i] = false;
-}
-EEPROM.put(0, set);
-EEPROM.write(100, 43);
+// ============================================================================
+// ⚙️ НИЗКОУРОВНЕВЫЕ ФУНКЦИИ ЖЕЛЕЗА
+// ============================================================================
+bool readGlassSensor(int index) {
+  if (index < 0 || index >= NUM_GLASSES) return HIGH;
+  int pin = pinSensors[index];
+  if (pin == A6 || pin == A7) {
+    return (analogRead(pin) < 400) ? LOW : HIGH;
+  }
+  return digitalRead(pin);
 }
 
 void stepMotor(int dir) {
-_stepIdx += (dir > 0) ? 1 : -1;
-_stepIdx &= 7;
-static const byte halfSteps[] = {0x01, 0x03, 0x02, 0x06, 0x04, 0x0C, 0x08, 0x09};
-for (int i = 0; i < 4; i++) digitalWrite(stepperPins[i], bitRead(halfSteps[_stepIdx], i));
+  static int currentStep = 0;
+  currentStep += dir;
+  if (currentStep > 7) currentStep = 0;
+  if (currentStep < 0) currentStep = 7;
+  for (int pin = 0; pin < 4; pin++) {
+    digitalWrite(pinStepper[pin], bitRead(stepperSequence[currentStep], pin));
+  }
 }
 
-void disableMotorOutputs() { for (int i = 0; i < 4; i++) digitalWrite(stepperPins[i], LOW); }
-
-void moveStepperTo(int targetSteps) {
-long stepsToMove = targetSteps - currentStepperPos;
-if (stepsToMove == 0) return;
-int dir = (stepsToMove > 0) ? 1 : -1;
-long totalAbs = abs(stepsToMove);
-for (long s = 0; s < totalAbs; s++) {
-stepMotor(dir);
-currentStepperPos += dir;
-delayMicroseconds(1200);
+void disableMotorOutputs() {
+  for (int pin = 0; pin < 4; pin++) { digitalWrite(pinStepper[pin], LOW); }
 }
-disableMotorOutputs();
+
+void moveStepperTo(int targetPos) {
+  if (currentStepperPos == targetPos) return;
+  resetSleepTimer();
+  while (currentStepperPos != targetPos) {
+    int dir = (targetPos - currentStepperPos > 0) ? 1 : -1;
+    stepMotor(dir);
+    currentStepperPos += dir;
+    delayMicroseconds(2000);
+  }
+  disableMotorOutputs();
 }
 
 void homeStepper() {
-while (digitalRead(HOME_SW_PIN) == HIGH) { stepMotor(-1); delayMicroseconds(2500); }
-currentStepperPos = set.homePos;
-disableMotorOutputs();
+  disableMotorOutputs();
+  currentStepperPos = set.homePos;
+}
+
+void sendMP3Raw(uint8_t command, uint8_t dat1, uint8_t dat2) {
+  uint8_t mp3Buf[8] = {0x7E, 0xFF, 0x06, command, 0x00, dat1, dat2, 0xEF};
+  for (uint8_t i = 0; i < 8; i++) { Serial.write(mp3Buf[i]); }
+}
+
+void setDefaultSettings() {
+  set.homePos = 0;
+  set.mlTimeMs = 150;
+  set.shotVolume = 30;
+  set.ledBrightness = 60;
+  set.sensorDelayMs = 1000;
+  set.mp3Volume = 15;
+  set.toastPauseS = 1;
+  set.toastDelayS = 15;
+  set.startDelayS = 1;
+  set.inviteTimeM = 20;     // По умолчанию напоминать раз в 20 минут
+  set.invitePlaceholder = 0;
+  set.staleTimeS = 0;
+  set.staleAlertS = 3;
+  set.savedMode = 0;
+
+  int defaultAngles[NUM_GLASSES] = {400, 800, 1200, 1600, 2000, 2400};
+  for (int i = 0; i < NUM_GLASSES; i++) {
+    set.shotPos[i] = defaultAngles[i];
+    set.shotVolumeIndividual[i] = set.shotVolume;
+    set.shotVolumeCustomized[i] = false;
+  }
 }
 
 void setup() {
-delay(1000);
-mp3Serial.begin(9600);
-for (int i = 0; i < 4; i++) pinMode(stepperPins[i], OUTPUT);
-disableMotorOutputs();
+  for (int i = 0; i < 4; i++) {
+    pinMode(pinStepper[i], OUTPUT);
+    digitalWrite(pinStepper[i], LOW);
+  }
+  for (int i = 0; i < NUM_GLASSES; i++) {
+    int pin = pinSensors[i];
+    if (pin != A6 && pin != A7) { pinMode(pin, INPUT_PULLUP); }
+  }
+  pinMode(PUMP_PIN, OUTPUT);
+  digitalWrite(PUMP_PIN, LOW);
+  pinMode(ENCODER_CLK, INPUT_PULLUP);
+  pinMode(ENCODER_DT, INPUT_PULLUP);
+  pinMode(ENCODER_SW, INPUT_PULLUP);
+  pinMode(MP3_BUSY_PIN, INPUT_PULLUP);
 
-oled.init(); oled.clear(); oled.setScale(2); oled.setCursor(10, 3); oled.print(F("НАЛИВАТОР"));
-// Подзаголовок
-oled.setScale(1);
-oled.setCursor(44, 6);
-oled.print(F("v 1.0"));
+  lastClk = digitalRead(ENCODER_CLK);
+  lastButtonState = digitalRead(ENCODER_SW);
 
-pinMode(HOME_SW_PIN, INPUT_PULLUP);
-pinMode(PUMP_PIN, OUTPUT);
-pinMode(MP3_BUSY_PIN, INPUT_PULLUP);
-digitalWrite(PUMP_PIN, LOW);
+  EEPROM.get(0, set);
+  if (set.mlTimeMs < 10 || set.mlTimeMs > 2000) {
+    setDefaultSettings();
+    EEPROM.put(0, set);
+  }
 
-if (EEPROM.read(100) != 43) setDefaultSettings();
-else {
-EEPROM.get(0, set);
-if (set.toastDelayS < 1 || set.toastDelayS > 30) set.toastDelayS = DEFAULT_TOAST_DELAY;
-if (set.toastPauseS < 0 || set.toastPauseS > 10) set.toastPauseS = DEFAULT_TOAST_PAUSE;
-if (set.mp3Volume < 0 || set.mp3Volume > 30) set.mp3Volume = DEFAULT_VOLUME;
-if (set.ledBrightness < 10 || set.ledBrightness > 255) set.ledBrightness = DEFAULT_LED_BRIGHTNESS;
-if (set.rouletteSpeed < 1 || set.rouletteSpeed > 10) set.rouletteSpeed = DEFAULT_ROULETTE_SPEED;
-if (set.sensorDelayMs < 100 || set.sensorDelayMs > 3000) set.sensorDelayMs = DEFAULT_SENSOR_DELAY_MS;
-if (set.rouletteSpinS < MIN_ROULETTE_SPIN_S || set.rouletteSpinS > MAX_ROULETTE_SPIN_S) set.rouletteSpinS = DEFAULT_ROULETTE_SPIN_S;
-if (set.staleTimeS < 0 || set.staleTimeS > MAX_STALE_TIME_S) set.staleTimeS = DEFAULT_STALE_TIME_S;
-if (set.staleAlertS < 1 || set.staleAlertS > MAX_STALE_ALERT_S) set.staleAlertS = DEFAULT_STALE_ALERT_S;
-set.shotVolume = constrain(set.shotVolume, MIN_POUR_VOLUME, MAX_POUR_VOLUME);
+  if (set.savedMode == 0) workMode = MODE_MANUAL;
+  else workMode = MODE_AUTOMATIC;
+
+  for (int i = 0; i < NUM_GLASSES; i++) { glassState[i] = EMPTY_SPACE; }
+
+  Serial.begin(9600);
+  delay(500);
+  if (set.mp3Volume > 0) { sendMP3Raw(0x06, 0, set.mp3Volume); delay(100); }
+
+  FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_GLASSES);
+  FastLED.setBrightness(set.ledBrightness);
+  FastLED.clear(); FastLED.show();
+
+  oled.init(); oled.clear();
+  updateDisplay();
+  resetSleepTimer();
+  homeStepper();
+  lastInviteTime = millis();
+  randomSeed(analogRead(A3) + analogRead(A4) + micros());
 }
-
-for (int i = 0; i < NUM_GLASSES; i++) {
-glassStaleTimer[i] = 0;
-staleTimerArmed[i] = false;
-glassState[i] = EMPTY_SPACE;
-}
-
-if (set.savedMode == 2) workMode = MODE_ROULETTE;
-else if (set.savedMode == 1) workMode = MODE_AUTOMATIC;
-else workMode = MODE_MANUAL;
-
-homeStepper();
-pinMode(ENCODER_CLK, INPUT_PULLUP);
-pinMode(ENCODER_DT, INPUT_PULLUP);
-pinMode(ENCODER_SW, INPUT_PULLUP);
-
-FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_GLASSES);
-FastLED.setBrightness(set.ledBrightness);
-FastLED.clear(); FastLED.show();
-
-sendMP3Raw(0x06, 0, set.mp3Volume);
-delay(100);
-
-if (set.mp3Volume > 0) {
-int safeDelay = constrain(set.startDelayS, 0, 10);
-if (safeDelay > 0) delay((unsigned long)safeDelay * 1000UL);
-sendMP3Raw(0x0F, (byte)SYSTEM_SOUND_FOLDER, 2);
-}
-
-lastClk = digitalRead(ENCODER_CLK);
-resetSleepTimer();
-delay(100);
-updateDisplay();
-}
-//--------------------------------------------------------------------------------------------------------- 2-я часть. КОНЕЦ -------------------------------------------------------------------------------------------------
+//------------------------------------------------------------------------------------
+//--------------------- 2-я часть. КОНЕЦ 
+//------------------------------------------------------------------------------------
 
 //------------------------------------------------------------------------------------
 //--------------------- 3-я часть. НАЧАЛО 
