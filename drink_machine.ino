@@ -243,8 +243,13 @@ updateDisplay();
 }
 //--------------------------------------------------------------------------------------------------------- 2-я часть. КОНЕЦ -------------------------------------------------------------------------------------------------
 
-//--------------------------------------------------------------------------------------------------------- 3-я часть. НАЧАЛО -------------------------------------------------------------------------------------------------
-void resetSleepTimer() { lastActivityTime = millis(); }
+//------------------------------------------------------------------------------------
+//--------------------- 3-я часть. НАЧАЛО 
+//------------------------------------------------------------------------------------
+void resetSleepTimer() { 
+  lastActivityTime = millis(); 
+  lastInviteTime = millis(); // Любое действие пользователя или налив сбрасывают таймер тишины Зазывалы
+}
 
 void wakeUpSystem() {
   if (state == SLEEP_MODE) {
@@ -253,7 +258,7 @@ void wakeUpSystem() {
 }
 
 void loop() {
-  // Автомат блокировки глубокого сна
+  // Проверяем, есть ли на столе хоть одна налитая рюмка
   bool hasAnyPouredGlass = false;
   for (int i = 0; i < NUM_GLASSES; i++) {
     if (glassState[i] == FILLED_GLASS) {
@@ -272,22 +277,32 @@ void loop() {
     }
   }
 
-  // ОБРАБОТКА ТОСТА
+  // ОБРАБОТКА ЭКРАНА ТОСТА / ЗАЗЫВАНИЯ
   if (state == TOAST_SCREEN) {
     if (toastAudioPending) {
       if (millis() - toastAudioTimer > ((unsigned long)set.toastPauseS * 1000UL)) {
         toastAudioPending = false;
-        if (set.mp3Volume > 0) { sendMP3Raw(0x0F, TOAST_SOUND_FOLDER, activeToastID); delay(250); }
+        // Если громкость больше нуля, включаем строго ROULETTE_TRACK_ID (Папка 1, трек 1)
+        if (set.mp3Volume > 0) { sendMP3Raw(0x0F, SYSTEM_SOUND_FOLDER, ROULETTE_TRACK_ID); delay(250); }
       }
     }
+
+    // Пока активен экран зазывания, крутим световую анимацию на пустом столе
+    if (!hasAnyPouredGlass && set.inviteTimeM > 0) {
+      int flashPhase = (millis() / 100) % NUM_GLASSES;
+      FastLED.clear();
+      leds[flashPhase] = COLOR_ACTIVE;
+      FastLED.show();
+    }
+
     if (!toastAudioPending && digitalRead(MP3_BUSY_PIN) == HIGH) {
-      state = MAIN_SCREEN; updateDisplay(); resetSleepTimer(); delay(200); return;
+      state = MAIN_SCREEN; FastLED.clear(); FastLED.show(); updateDisplay(); resetSleepTimer(); delay(200); return;
     }
     if (millis() - toastScreenTimer > ((unsigned long)set.toastDelayS * 1000UL)) {
-      sendMP3Raw(0x16, 0, 0); delay(50); state = MAIN_SCREEN; updateDisplay(); resetSleepTimer(); delay(200); return;
+      sendMP3Raw(0x16, 0, 0); delay(50); state = MAIN_SCREEN; FastLED.clear(); FastLED.show(); updateDisplay(); resetSleepTimer(); delay(200); return;
     }
     if (digitalRead(ENCODER_SW) == LOW || digitalRead(ENCODER_CLK) == LOW) {
-      sendMP3Raw(0x16, 0, 0); delay(100); state = MAIN_SCREEN; updateDisplay(); resetSleepTimer(); delay(300); return;
+      sendMP3Raw(0x16, 0, 0); delay(100); state = MAIN_SCREEN; FastLED.clear(); FastLED.show(); updateDisplay(); resetSleepTimer(); delay(300); return;
     }
     return;
   }
@@ -298,7 +313,24 @@ void loop() {
     delay(20); return;
   }
 
-  // Обработка вращения энкодера
+  // ==================== ЛОГИКА АКТИВНОГО ЗАЗЫВАЛЫ ====================
+  // Работает на главном экране, если уставка минут > 0 и на столе НЕТ налитых рюмок
+  if (state == MAIN_SCREEN && set.inviteTimeM > 0 && !hasAnyPouredGlass) {
+    if (millis() - lastInviteTime >= ((unsigned long)set.inviteTimeM * 60000UL)) {
+      lastInviteTime = millis();
+      lastToastTime = millis();
+      state = TOAST_SCREEN; 
+      toastScreenTimer = millis(); 
+      toastAudioTimer = millis(); 
+      toastAudioPending = true; 
+      
+      oled.clear(); 
+      // Вместо прокрутки рулетки просто выводим текст
+      printStr(M_INVITE_CALL, 3, 1, true); 
+    }
+  }
+
+  // Обработка вращения энкодера (сбросит таймер Зазывалы)
   int currentClk = digitalRead(ENCODER_CLK);
   if (currentClk != lastClk && currentClk == LOW) {
     resetSleepTimer();
@@ -307,9 +339,8 @@ void loop() {
   }
   lastClk = currentClk;
 
-  // ========== НОВАЯ ОБРАБОТКА КНОПКИ С АНТИДРЕБЕЗГОМ ==========
+  // ОБРАБОТКА КНОПКИ С АНТИДРЕБЕЗГОМ (сбросит таймер Зазывалы)
   bool currentButtonState = digitalRead(ENCODER_SW);
-
   if (currentButtonState != lastButtonState) {
     lastButtonDebounceTime = millis();
   }
@@ -318,7 +349,6 @@ void loop() {
     if (currentButtonState == LOW && !buttonPressProcessed) {
       buttonPressProcessed = true;
       resetSleepTimer();
-
       if (millis() - lastEncoderMoveTime > 300) {
         pressTime = millis();
         isPress = true;
@@ -327,10 +357,8 @@ void loop() {
     }
     else if (currentButtonState == HIGH && buttonPressProcessed) {
       buttonPressProcessed = false;
-
       if (isPress && !longPressTriggered) {
         unsigned long holdDuration = millis() - pressTime;
-
         if (holdDuration >= 80 && holdDuration < 600) {
           if (waitSecondClick && (millis() - lastReleaseTime < (unsigned long)DOUBLE_CLICK_TIMEOUT_MS)) {
             waitSecondClick = false;
@@ -345,30 +373,21 @@ void loop() {
     }
   }
 
-  // Длинный пресс
   if (isPress && !longPressTriggered && (millis() - pressTime > 600)) {
     longPressTriggered = true;
     waitSecondClick = false;
     handleLongPress();
   }
 
-  // Одиночный клик
   if (waitSecondClick && (millis() - lastReleaseTime >= (unsigned long)DOUBLE_CLICK_TIMEOUT_MS)) {
     waitSecondClick = false;
-
     if (state == MAIN_SCREEN && workMode == MODE_MANUAL) {
       bool physicsGlassPresent = false;
       for (int g = 0; g < NUM_GLASSES; g++) {
-        if (readGlassSensor(g) == LOW && glassState[g] == EMPTY_GLASS) {
-          physicsGlassPresent = true;
-          break;
-        }
+        if (readGlassSensor(g) == LOW && glassState[g] == EMPTY_GLASS) { physicsGlassPresent = true; break; }
       }
       if (!physicsGlassPresent) {
-        oled.clear();
-        printStr(M_NO_NEW, 3, 1, true);
-        delay(1500);
-        updateDisplay();
+        oled.clear(); printStr(M_NO_NEW, 3, 1, true); delay(1500); updateDisplay();
       } else {
         handleShortClick();
       }
@@ -379,22 +398,12 @@ void loop() {
 
   lastButtonState = currentButtonState;
 
-  // Калибровка помпы
   if (state == CAL_PUMP && currentButtonState == LOW && !longPressTriggered) {
     static unsigned long calibPressStart = 0;
     static bool calibPressActive = false;
-
-    if (!calibPressActive) {
-      calibPressStart = millis();
-      calibPressActive = true;
-    }
-
-    if (millis() - calibPressStart > 400) {
-      runPumpCalibration();
-      calibPressActive = false;
-    }
+    if (!calibPressActive) { calibPressStart = millis(); calibPressActive = true; }
+    if (millis() - calibPressStart > 400) { runPumpCalibration(); calibPressActive = false; }
   }
-  // ==========================================================
 
   bool allGlassesDisabled = true;
   for (int i = 0; i < NUM_GLASSES; i++) {
@@ -403,37 +412,31 @@ void loop() {
 
 //--------------------------------------------------------------------------------------------------------- 3-2 часть. НАЧАЛО -------------------------------------------------------------------------------------------------
 
-// Опрос 6 концевиков рюмок на основе пятистатусной модели GlassStatus
-bool tableChanged = false;
-for (int i = 0; i < NUM_GLASSES; i++) {
-  if (allGlassesDisabled && state == MAIN_SCREEN) {
-    if (leds[i] != CRGB::Black) { leds[i] = CRGB::Black; tableChanged = true; }
-    glassTimerArmed[i] = false; glassPlacementTime[i] = 0;
-    glassState[i] = EMPTY_SPACE;
-    glassStaleTimer[i] = 0; alertStopTimer[i] = 0; isAlerting[i] = false; staleTimerArmed[i] = false;
-    continue;
-  }
-
-  bool sensorState = readGlassSensor(i);
-  if (sensorState == HIGH) {
-    // РЮМКИ ФИЗИЧЕСКИ НЕТ НА СТОЛЕ: Полный сброс всех флагов и таймеров для этой позиции
-    if (glassTimerArmed[i] || glassPlacementTime[i] != 0) { glassTimerArmed[i] = false; glassPlacementTime[i] = 0; tableChanged = true; }
-    glassStaleTimer[i] = 0; alertStopTimer[i] = 0; isAlerting[i] = false; staleTimerArmed[i] = false;
-
-    // Если стакан убрали, а он был налит — запускаем Тамаду строго один раз при смене статуса!
-    if (glassState[i] == FILLED_GLASS) {
+  // ==================== ОПРОС ДАТЧИКОВ СТОЛА И "ПИНАТЕЛЬ" ====================
+  bool tableChanged = false;
+  for (int i = 0; i < NUM_GLASSES; i++) {
+    if (allGlassesDisabled && state == MAIN_SCREEN) {
+      if (leds[i] != CRGB::Black) { leds[i] = CRGB::Black; tableChanged = true; }
+      glassTimerArmed[i] = false; glassPlacementTime[i] = 0;
       glassState[i] = EMPTY_SPACE;
-      tableChanged = true;
-      resetSleepTimer();
+      glassStaleTimer[i] = 0; alertStopTimer[i] = 0; isAlerting[i] = false; staleTimerArmed[i] = false;
+      continue;
+    }
 
-      if (state == MAIN_SCREEN) {
-        bool triggerToast = false;
-        if (workMode == MODE_ROULETTE) {
-          // Если это Рулетка, тост сработает только если время звучания предыдущего тоста полностью истекло!
-          if (millis() - lastToastTime >= ((unsigned long)set.toastDelayS * 1000UL)) {
-            triggerToast = true;
-          }
-        } else {
+    bool sensorState = readGlassSensor(i);
+    if (sensorState == HIGH) {
+      // РЮМКИ ФИЗИЧЕСКИ НЕТ НА СТОЛЕ: Полный сброс всех флагов и таймеров для этой позиции
+      if (glassTimerArmed[i] || glassPlacementTime[i] != 0) { glassTimerArmed[i] = false; glassPlacementTime[i] = 0; tableChanged = true; }
+      glassStaleTimer[i] = 0; alertStopTimer[i] = 0; isAlerting[i] = false; staleTimerArmed[i] = false;
+
+      // Если стакан убрали, а он был налит — запускаем Тамаду строго один раз при смене статуса!
+      if (glassState[i] == FILLED_GLASS) {
+        glassState[i] = EMPTY_SPACE;
+        tableChanged = true;
+        resetSleepTimer(); // Установка новой рюмки или уборка старой сбросит таймер Зазывалы!
+
+        if (state == MAIN_SCREEN) {
+          bool triggerToast = false;
           bool anyFullGlassLeft = false;
           for (int j = 0; j < NUM_GLASSES; j++) {
             if (j != i && readGlassSensor(j) == LOW && glassState[j] == FILLED_GLASS) {
@@ -442,163 +445,156 @@ for (int i = 0; i < NUM_GLASSES; i++) {
             }
           }
           if (!anyFullGlassLeft) triggerToast = true;
-        }
 
-        if (triggerToast) {
-          lastToastTime = millis(); // Фиксируем точное время запуска тоста для защиты от лавины треков
-          activeToastID = random(1, TOTAL_TOAST_TRACKS + 1);
-          state = TOAST_SCREEN; toastScreenTimer = millis(); toastAudioTimer = millis(); toastAudioPending = true; showToastOnDisplay();
+          // Запускаем тост "Тамады", только если "Зазывала" сейчас не играет призывный трек
+          if (triggerToast && (millis() - lastToastTime >= ((unsigned long)set.toastDelayS * 1000UL))) {
+            lastToastTime = millis(); 
+            activeToastID = random(1, TOTAL_TOAST_TRACKS + 1);
+            state = TOAST_SCREEN; toastScreenTimer = millis(); toastAudioTimer = millis(); toastAudioPending = true; showToastOnDisplay();
+          }
         }
+      } else {
+        glassState[i] = EMPTY_SPACE;
+      }
+
+      // Светодиод пустого места
+      if (set.shotVolumeIndividual[i] == 0 && state == MAIN_SCREEN) {
+        if (leds[i] != CRGB::Black) { leds[i] = CRGB::Black; tableChanged = true; }
+      } else if (state == MAIN_SCREEN) {
+        CRGB targetStandby = COLOR_STANDBY;
+        targetStandby.nscale8_video(BRIGHT_STANDBY);
+        if (leds[i] != targetStandby) { leds[i] = targetStandby; tableChanged = true; }
       }
     } else {
-      glassState[i] = EMPTY_SPACE;
-    }
-
-    // Светодиод пустого места
-    if (set.shotVolumeIndividual[i] == 0 && state == MAIN_SCREEN) {
-      if (leds[i] != CRGB::Black) { leds[i] = CRGB::Black; tableChanged = true; }
-    } else if (state == MAIN_SCREEN) {
-      CRGB targetStandby = COLOR_STANDBY;
-      targetStandby.nscale8_video(BRIGHT_STANDBY);
-      if (leds[i] != targetStandby) { leds[i] = targetStandby; tableChanged = true; }
-    }
-  } else {
-    // РЮМКА ФИЗИЧЕСКИ СТОИТ НА СТОЛЕ (Датчик LOW)
-    if (state == MAIN_SCREEN) {
-      if (set.shotVolumeIndividual[i] == 0) {
-        // Место программно отключено (0 мл)
-        if (glassState[i] == FILLED_GLASS || glassState[i] == DISABLED_SPACE) {
+      // РЮМКА ФИЗИЧЕСКИ СТОИТ НА СТОЛЕ (Датчик LOW)
+      if (state == MAIN_SCREEN) {
+        if (set.shotVolumeIndividual[i] == 0) {
+          // Место программно отключено (0 мл)
           glassState[i] = DISABLED_SPACE;
+          CRGB targetDisabled = COLOR_DISABLED;
+          targetDisabled.nscale8_video(BRIGHT_DISABLED);
+          if (leds[i] != targetDisabled) { leds[i] = targetDisabled; tableChanged = true; }
+          glassTimerArmed[i] = false;
         } else {
-          glassState[i] = DISABLED_SPACE;
-        }
+          if (glassState[i] == DISABLED_SPACE) { glassState[i] = FILLED_GLASS; tableChanged = true; }
 
-        CRGB targetDisabled = COLOR_DISABLED;
-        targetDisabled.nscale8_video(BRIGHT_DISABLED);
-        if (leds[i] != targetDisabled) { leds[i] = targetDisabled; tableChanged = true; }
-        glassTimerArmed[i] = false;
-      } else {
-        // Рюмка активна (>0 мл)
-        
-        // Если объем вернули из нуля вверх, а рюмка стояла заблокированной полной — возвращаем FILLED_GLASS
-        if (glassState[i] == DISABLED_SPACE) {
-          glassState[i] = FILLED_GLASS;
-          tableChanged = true;
-        }
-
-        // Если стакан только что поставили на пустое место — он переходит в EMPTY_GLASS
-        if (glassState[i] == EMPTY_SPACE) {
-          glassState[i] = EMPTY_GLASS;
-          tableChanged = true;
-        }
-
-        // Ветка работы налитой рюмки (Пинатель)
-        if (glassState[i] == FILLED_GLASS) {
-          if (!staleTimerArmed[i] && !isAlerting[i] && set.staleTimeS > 0) {
-            glassStaleTimer[i] = millis();
-            staleTimerArmed[i] = true;
+          // Если стакан только что поставили на пустое место — он переходит в EMPTY_GLASS
+          if (glassState[i] == EMPTY_SPACE) {
+            glassState[i] = EMPTY_GLASS;
+            tableChanged = true;
+            resetSleepTimer(); // Установка рюмки мгновенно сбросит таймер тишины Зазывалы!
           }
 
-          // АВТОМАТ УМНОГО "ПИНАТЕЛЯ"
-          if (set.staleTimeS > 0 && staleTimerArmed[i]) {
-            if (!isAlerting[i]) {
-              if (millis() - glassStaleTimer[i] >= ((unsigned long)set.staleTimeS * 1000UL)) {
-                isAlerting[i] = true;
-                alertStopTimer[i] = millis();
-                if (set.mp3Volume > 0 && digitalRead(MP3_BUSY_PIN) == HIGH) {
-                  sendMP3Raw(0x0F, (byte)SYSTEM_SOUND_FOLDER, STALE_SOUND_TRACK_ID);
+          // Ветка работы налитой рюмки (Пинатель) — работает независимо!
+          if (glassState[i] == FILLED_GLASS) {
+            if (!staleTimerArmed[i] && !isAlerting[i] && set.staleTimeS > 0) {
+              glassStaleTimer[i] = millis();
+              staleTimerArmed[i] = true;
+            }
+
+            if (set.staleTimeS > 0 && staleTimerArmed[i]) {
+              if (!isAlerting[i]) {
+                if (millis() - glassStaleTimer[i] >= ((unsigned long)set.staleTimeS * 1000UL)) {
+                  isAlerting[i] = true;
+                  alertStopTimer[i] = millis();
+                  if (set.mp3Volume > 0 && digitalRead(MP3_BUSY_PIN) == HIGH) {
+                    sendMP3Raw(0x0F, (byte)SYSTEM_SOUND_FOLDER, STALE_SOUND_TRACK_ID);
+                  }
+                }
+                CRGB targetPoured = COLOR_POURED;
+                targetPoured.nscale8_video(BRIGHT_POURED);
+                if (leds[i] != targetPoured) { leds[i] = targetPoured; tableChanged = true; }
+              } else {
+                if (millis() - alertStopTimer[i] < ((unsigned long)set.staleAlertS * 1000UL)) {
+                  int flashPhase = (millis() / 150) % 6;
+                  CRGB nextColor;
+                  if (flashPhase == 0 || flashPhase == 2 || flashPhase == 4) nextColor = CRGB::Black;
+                  else {
+                    CRGB targetPoured = COLOR_POURED;
+                    targetPoured.nscale8_video(BRIGHT_POURED);
+                    nextColor = targetPoured;
+                  }
+                  if (leds[i] != nextColor) { leds[i] = nextColor; FastLED.show(); }
+                } else {
+                  isAlerting[i] = false; alertStopTimer[i] = 0;
+                  glassStaleTimer[i] = millis();
+                  CRGB targetPoured = COLOR_POURED;
+                  targetPoured.nscale8_video(BRIGHT_POURED);
+                  if (leds[i] != targetPoured) { leds[i] = targetPoured; tableChanged = true; }
                 }
               }
+            } else {
               CRGB targetPoured = COLOR_POURED;
               targetPoured.nscale8_video(BRIGHT_POURED);
               if (leds[i] != targetPoured) { leds[i] = targetPoured; tableChanged = true; }
-            } else {
-              if (millis() - alertStopTimer[i] < ((unsigned long)set.staleAlertS * 1000UL)) {
-                int flashPhase = (millis() / 150) % 6;
-                CRGB nextColor;
-                if (flashPhase == 0 || flashPhase == 2 || flashPhase == 4) nextColor = CRGB::Black;
-                else {
-                  CRGB targetPoured = COLOR_POURED;
-                  targetPoured.nscale8_video(BRIGHT_POURED);
-                  nextColor = targetPoured;
-                }
-                if (leds[i] != nextColor) { leds[i] = nextColor; FastLED.show(); }
-              } else {
-                isAlerting[i] = false; alertStopTimer[i] = 0;
-                glassStaleTimer[i] = millis();
-                CRGB targetPoured = COLOR_POURED;
-                targetPoured.nscale8_video(BRIGHT_POURED);
-                leds[i] = targetPoured; tableChanged = true;
-              }
             }
-          } else {
-            CRGB targetPoured = COLOR_POURED;
-            targetPoured.nscale8_video(BRIGHT_POURED);
-            if (leds[i] != targetPoured) { leds[i] = targetPoured; tableChanged = true; }
           }
-        }
-        else if (glassState[i] == EMPTY_GLASS) {
-          // Ветка ожидания налива пустой рюмки
-          CRGB targetActive = COLOR_ACTIVE;
-          targetActive.nscale8_video(BRIGHT_ACTIVE);
-          if (leds[i] != targetActive) { leds[i] = targetActive; tableChanged = true; }
-
-          resetSleepTimer();
-          if (!glassTimerArmed[i]) { glassPlacementTime[i] = millis(); glassTimerArmed[i] = true; tableChanged = true; }
-        }
-      }
-    }
-  }
-}
-if (tableChanged) FastLED.show();
-if (tableChanged && state == MAIN_SCREEN) updateDisplay();
-
-// ИНТЕЛЛЕКТУАЛЬНЫЙ АВТОМАТ НАЛИВА И ПАРКОВКИ В LOOP
-if (state == MAIN_SCREEN && !allGlassesDisabled) {
-  bool needPour = false;
-
-  if (workMode == MODE_AUTOMATIC) {
-    for (int i = 0; i < NUM_GLASSES; i++) {
-      if (readGlassSensor(i) == LOW && glassState[i] == EMPTY_GLASS && glassTimerArmed[i] && set.shotVolumeIndividual[i] > 0) {
-        if (millis() - glassPlacementTime[i] >= (unsigned long)set.sensorDelayMs) {
-          glassTimerArmed[i] = false;
-          needPour = true;
-          break;
-        }
-      }
-    }
-  }
-
-  if (needPour) {
-    resetSleepTimer();
-    checkAndPour();
-  }
-  else if (currentStepperPos != set.homePos) {
-    static unsigned long lastStepMicros = 0;
-    if (micros() - lastStepMicros >= 2000) {
-      lastStepMicros = micros();
-      int dir = (set.homePos - currentStepperPos > 0) ? 1 : -1;
-      stepMotor(dir);
-      currentStepperPos += dir;
-
-      if (workMode == MODE_AUTOMATIC) {
-        for (int i = 0; i < NUM_GLASSES; i++) {
-          if (readGlassSensor(i) == LOW && glassState[i] == EMPTY_GLASS && set.shotVolumeIndividual[i] > 0 && !glassTimerArmed[i]) {
-            glassPlacementTime[i] = millis();
-            glassTimerArmed[i] = true;
+          else if (glassState[i] == EMPTY_GLASS) {
+            // Ветка ожидания автоматического налива пустой рюмки
             CRGB targetActive = COLOR_ACTIVE;
             targetActive.nscale8_video(BRIGHT_ACTIVE);
-            leds[i] = targetActive;
-            FastLED.show();
+            if (leds[i] != targetActive) { leds[i] = targetActive; tableChanged = true; }
+
+            resetSleepTimer();
+            if (!glassTimerArmed[i]) { glassPlacementTime[i] = millis(); glassTimerArmed[i] = true; tableChanged = true; }
           }
         }
       }
-      if (currentStepperPos == set.homePos) disableMotorOutputs();
     }
   }
-}
-}
-//--------------------------------------------------------------------------------------------------------- 3-я часть. КОНЕЦ -------------------------------------------------------------------------------------------------
+  if (tableChanged) FastLED.show();
+  if (tableChanged && state == MAIN_SCREEN) updateDisplay();
+
+  // ИНТЕЛЛЕКТУАЛЬНЫЙ АВТОМАТ НАЛИВА И ПАРКОВКИ В LOOP
+  if (state == MAIN_SCREEN && !allGlassesDisabled) {
+    bool needPour = false;
+
+    if (workMode == MODE_AUTOMATIC) {
+      for (int i = 0; i < NUM_GLASSES; i++) {
+        if (readGlassSensor(i) == LOW && glassState[i] == EMPTY_GLASS && glassTimerArmed[i] && set.shotVolumeIndividual[i] > 0) {
+          if (millis() - glassPlacementTime[i] >= (unsigned long)set.sensorDelayMs) {
+            glassTimerArmed[i] = false;
+            needPour = true;
+            break;
+          }
+        }
+      }
+    }
+
+    if (needPour) {
+      resetSleepTimer();
+      checkAndPour();
+    }
+    else if (currentStepperPos != set.homePos) {
+      // Неблокирующее возвращение башни домой (пошагово, без задержек задержек delay)
+      static unsigned long lastStepMicros = 0;
+      if (micros() - lastStepMicros >= 2000) {
+        lastStepMicros = micros();
+        int dir = (set.homePos - currentStepperPos > 0) ? 1 : -1;
+        stepMotor(dir);
+        currentStepperPos += dir;
+
+        if (workMode == MODE_AUTOMATIC) {
+          for (int i = 0; i < NUM_GLASSES; i++) {
+            if (readGlassSensor(i) == LOW && glassState[i] == EMPTY_GLASS && set.shotVolumeIndividual[i] > 0 && !glassTimerArmed[i]) {
+              glassPlacementTime[i] = millis();
+              glassTimerArmed[i] = true;
+              CRGB targetActive = COLOR_ACTIVE;
+              targetActive.nscale8_video(BRIGHT_ACTIVE);
+              leds[i] = targetActive;
+              FastLED.show();
+            }
+          }
+        }
+        if (currentStepperPos == set.homePos) disableMotorOutputs();
+      }
+    }
+  }
+} // <- Финальная закрывающая скобка функции loop()
+//------------------------------------------------------------------------------------
+//--------------------- 3-я часть. КОНЕЦ 
+//------------------------------------------------------------------------------------
+
 
 //--------------------------------------------------------------------------------------------------------- 4-я часть. НАЧАЛО -------------------------------------------------------------------------------------------------
 // [ИСПРАВЛЕНО]: Честный подсчет символов UTF-8 (русских букв) для идеального центрирования
@@ -822,7 +818,9 @@ void runPumpCalibration() {
 }
 //--------------------------------------------------------------------------------------------------------- 4-я часть. КОНЕЦ -------------------------------------------------------------------------------------------------
 
-//--------------------------------------------------------------------------------------------------------- 5-я часть НАЧАЛО -------------------------------------------------------------------------------------------------
+//------------------------------------------------------------------------------------
+//--------------------- 5-я часть НАЧАЛО 
+//------------------------------------------------------------------------------------
 void handleEncoderTurn(bool isRight) {
   if (state == FAST_DOSING) {
     set.shotVolumeIndividual[dosingGlassSelector] += isRight ? VOLUME_STEP_ML : -VOLUME_STEP_ML;
@@ -856,11 +854,12 @@ void handleEncoderTurn(bool isRight) {
     updateDisplay();
     return;
   }
+  
   if (state == SET_MODE) {
     if (toastSubItem == 0) {
       menuSelector += isRight ? 1 : -1;
-      if (menuSelector > 3) menuSelector = 0;
-      if (menuSelector < 0) menuSelector = 3;
+      if (menuSelector > 2) menuSelector = 0;
+      if (menuSelector < 0) menuSelector = 2;
     } else dosingGlassSelector = (dosingGlassSelector == 1) ? 0 : 1;
     updateDisplay();
     return;
@@ -897,23 +896,20 @@ void handleEncoderTurn(bool isRight) {
     return;
   }
 
-  if (state == SET_ROULETTE_MENU) {
+  // ОБНОВЛЕННАЯ НАСТРОЙКА ТАЙМАУТА ЗАЗЫВАЛЫ
+  if (state == SET_INVITE_MENU) {
     if (toastSubItem == 0) {
       dosingGlassSelector += isRight ? 1 : -1;
-      if (dosingGlassSelector > 2) dosingGlassSelector = 0;
-      if (dosingGlassSelector < 0) dosingGlassSelector = 2;
+      if (dosingGlassSelector > 1) dosingGlassSelector = 0;
+      if (dosingGlassSelector < 0) dosingGlassSelector = 1;
     } else {
-      if (dosingGlassSelector == 0) {
-        set.rouletteSpinS += isRight ? 1 : -1;
-        set.rouletteSpinS = constrain(set.rouletteSpinS, MIN_ROULETTE_SPIN_S, MAX_ROULETTE_SPIN_S);
-      } else if (dosingGlassSelector == 1) {
-        set.rouletteSpeed += isRight ? 1 : -1;
-        set.rouletteSpeed = constrain(set.rouletteSpeed, 1, 10);
-      }
+      set.inviteTimeM += isRight ? INVITE_TIME_STEP_M : -INVITE_TIME_STEP_M;
+      set.inviteTimeM = constrain(set.inviteTimeM, 0, MAX_INVITE_TIME_M); // Разрешаем опускаться до 0
     }
     updateDisplay();
     return;
   }
+  
   if (state == SUB_MENU_EDIT && menuSelector == 1) {
     if (toastSubItem == 0) {
       currentGlass += isRight ? 1 : -1;
@@ -935,6 +931,7 @@ void handleEncoderTurn(bool isRight) {
     updateDisplay();
     return;
   }
+  
   if (state == SUB_MENU_EDIT && menuSelector != 1) {
     if (menuSelector == 7) {
       set.ledBrightness += isRight ? 5 : -5;
@@ -948,6 +945,7 @@ void handleEncoderTurn(bool isRight) {
     updateDisplay();
     return;
   }
+  
   if (state == RESET_PAGE || state == PUMP_FLUSH) {
     dosingGlassSelector = (dosingGlassSelector == 1) ? 0 : 1;
     updateDisplay();
@@ -957,27 +955,18 @@ void handleEncoderTurn(bool isRight) {
   if (state == MAIN_SCREEN) {
     int delta = isRight ? VOLUME_STEP_ML : -VOLUME_STEP_ML;
     int baseVol = MIN_POUR_VOLUME;
-
     for (int i = 0; i < NUM_GLASSES; i++) {
       if (!set.shotVolumeCustomized[i] && readGlassSensor(i) == HIGH) {
         baseVol = set.shotVolumeIndividual[i];
         break;
       }
     }
-
     int targetVol = constrain(baseVol + delta, MIN_POUR_VOLUME, MAX_POUR_VOLUME);
     set.shotVolume = targetVol;
-
     for (int i = 0; i < NUM_GLASSES; i++) {
-      if (readGlassSensor(i) == LOW && glassState[i] == FILLED_GLASS) {
-        continue;
-      }
-
-      if (!set.shotVolumeCustomized[i]) {
-        set.shotVolumeIndividual[i] = targetVol;
-      } else if (set.shotVolumeIndividual[i] == targetVol) {
-        set.shotVolumeCustomized[i] = false;
-      }
+      if (readGlassSensor(i) == LOW && glassState[i] == FILLED_GLASS) continue;
+      if (!set.shotVolumeCustomized[i]) { set.shotVolumeIndividual[i] = targetVol; }
+      else if (set.shotVolumeIndividual[i] == targetVol) { set.shotVolumeCustomized[i] = false; }
     }
   } else if (state == ROOT_MENU) {
     menuSelector += isRight ? 1 : -1;
@@ -986,7 +975,9 @@ void handleEncoderTurn(bool isRight) {
   }
   updateDisplay();
 }
-//--------------------------------------------------------------------------------------------------------- 5-я часть КОНЕЦ -------------------------------------------------------------------------------------------------
+//------------------------------------------------------------------------------------
+//--------------------- 5-я часть КОНЕЦ 
+//------------------------------------------------------------------------------------
 
 //--------------------------------------------------------------------------------------------------------- 6-я часть НАЧАЛО -------------------------------------------------------------------------------------------------
 void handleShortClick() {
@@ -1525,34 +1516,19 @@ if (set.mp3Volume == 0) {
       printStr(T_ROT_HINT, 7, 1, true);
     }
   }
-  else if (state == SET_ROULETTE_MENU) {
+  else if (state == SET_INVITE_MENU) {
+    printStr(M3, 0, 1, true); // Пишем заголовок "ЗАЗЫВАЛА"
     if (toastSubItem == 0) {
-      printStr(F("РУЛЕТКА"), 1, 1, false);
-      if (dosingGlassSelector == 0) {
-        printStr(F("ВРЕМЯ"), 3, 2, false);
-      } else if (dosingGlassSelector == 1) {
-        printStr(F("СКОРОСТЬ"), 3, 2, false);
-      } else {
-        printStr(T_BACK, 3, 2, true);
-      }
-      printStr(T_ROT_HINT, 7, 1, true);
+      if (dosingGlassSelector == 0) printStr(S_T_OUT, 3, 1, false);
+      else printStr(T_BACK, 3, 1, true);
     } else {
-      if (dosingGlassSelector == 0) {
-        printStr(F("ВРЕМЯ ВРАЩЕНИЯ"), 1, 1, false);
-        oled.setScale(3);
-        oled.setCursor(35, 3);
-        oled.print(set.rouletteSpinS);
-        oled.setScale(1);
-        oled.print(F(" сек"));
-      } else if (dosingGlassSelector == 1) {
-        printStr(F("СКОРОСТЬ ВРАЩЕНИЯ"), 1, 1, false);
-        oled.setScale(3);
-        oled.setCursor(55, 3);
-        oled.print(set.rouletteSpeed);
-        oled.setScale(1);
-        oled.print(F(" об"));
+      oled.setCursor(35, 3);
+      if (set.inviteTimeM == 0) {
+        oled.setScale(3); oled.print(F("ВЫКЛ")); // Если 0 минут — пишем ВЫКЛ крупно
+      } else {
+        oled.setScale(3); oled.print(set.inviteTimeM);
+        oled.setScale(1); printStr(S_MIN, 3, 1, true);
       }
-      printStr(T_ROT_HINT, 7, 1, true);
     }
   }
   else if (state == SET_TOAST_TIME) {
