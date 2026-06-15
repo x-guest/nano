@@ -1007,21 +1007,18 @@ void handleShortClick() {
   if (state == FAST_DOSING) {
     dosingGlassSelector++;
     if (dosingGlassSelector >= NUM_GLASSES) {
-      EEPROM.put(0, set);
-      showSaveAlert();
-      state = MAIN_SCREEN;
+      EEPROM.put(0, set); showSaveAlert(); state = MAIN_SCREEN;
     }
-    updateDisplay();
-    return;
+    updateDisplay(); return;
   }
 
   if (state == MAIN_SCREEN) {
-    if (workMode == MODE_MANUAL || workMode == MODE_ROULETTE) checkAndPour();
+    if (workMode == MODE_MANUAL) checkAndPour();
   } else if (state == ROOT_MENU) {
     if (menuSelector == 0) { state = SET_MODE; menuSelector = 0; toastSubItem = 0; }
     else if (menuSelector == 1) { state = SUB_MENU_EDIT; currentGlass = 0; toastSubItem = 0; moveStepperTo(set.homePos); }
     else if (menuSelector == 2) { state = SET_BASE_VOLUME; }
-    else if (menuSelector == 3) { state = SET_ROULETTE_MENU; dosingGlassSelector = 0; toastSubItem = 0; }
+    else if (menuSelector == 3) { state = SET_INVITE_MENU; dosingGlassSelector = 0; toastSubItem = 0; } // Переход на Зазывалу
     else if (menuSelector == 4) { state = SET_TOAST_TIME; dosingGlassSelector = 0; toastSubItem = 0; }
     else if (menuSelector == 5) { state = SET_STALE_MENU; dosingGlassSelector = 0; }
     else if (menuSelector == 6) { state = CAL_PUMP; }
@@ -1045,20 +1042,20 @@ void handleShortClick() {
     } else { EEPROM.put(0, set); showSaveAlert(); state = ROOT_MENU; }
   } else if (state == SET_MODE) {
     if (toastSubItem == 0) {
-      if (menuSelector == 3) { state = ROOT_MENU; menuSelector = 0; }
+      if (menuSelector == 2) { state = ROOT_MENU; menuSelector = 0; } // Исправлен индекс выхода
       else { toastSubItem = 1; dosingGlassSelector = 0; }
     } else if (toastSubItem == 1) {
       if (dosingGlassSelector == 0) {
-        if (menuSelector == 0) { workMode = MODE_MANUAL; set.savedMode = 0; }
-        else if (menuSelector == 1) { workMode = MODE_AUTOMATIC; set.savedMode = 1; }
-        else if (menuSelector == 2) { workMode = MODE_ROULETTE; set.savedMode = 2; }
-        state = MAIN_SCREEN; EEPROM.put(0, set); showSaveAlert();
+        if (menuSelector == 0) workMode = MODE_MANUAL;
+        else if (menuSelector == 1) workMode = MODE_AUTOMATIC;
+        state = MAIN_SCREEN; set.savedMode = (menuSelector == 0) ? 0 : 1; EEPROM.put(0, set); showSaveAlert();
         menuSelector = 0; toastSubItem = 0;
       } else toastSubItem = 0;
     }
-  } else if (state == SET_ROULETTE_MENU) {
+  } else if (state == SET_INVITE_MENU) {
+    // Выход и сохранение настроек Зазывалы по клику
     if (toastSubItem == 0) {
-      if (dosingGlassSelector == 2) { state = ROOT_MENU; menuSelector = 3; toastSubItem = 0; }
+      if (dosingGlassSelector == 1) { state = ROOT_MENU; menuSelector = 3; toastSubItem = 0; }
       else toastSubItem = 1;
     } else { EEPROM.put(0, set); showSaveAlert(); toastSubItem = 0; }
   } else if (state == SET_TOAST_TIME) {
